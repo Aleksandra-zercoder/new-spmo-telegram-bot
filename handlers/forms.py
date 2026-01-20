@@ -11,7 +11,7 @@ from aiogram.fsm.state import State, StatesGroup
 from keyboards.main_menu import get_main_menu
 from keyboards.forms_menu import get_lead_contact_kb
 from config import Settings
-from utils.json_loader import load_json, save_json  # ✅ НЕ ХВАТАЛО
+from utils.json_loader import load_json, save_json
 
 
 router = Router()
@@ -54,13 +54,37 @@ def _is_lead_button(text: str) -> bool:
     return t in {"📩 Оставить заявку", "Оставить заявку"}
 
 
+# =========================
+# START LEAD — reply button
+# =========================
 @router.message(F.text.func(_is_lead_button))
 async def lead_start(message: types.Message, state: FSMContext) -> None:
     await state.clear()
     await state.set_state(LeadForm.contact_text)
+    await state.update_data(lead_source="reply_button")  # полезно для логов
     await message.answer(CONTACT_PROMPT, reply_markup=get_lead_contact_kb())
 
 
+# =========================
+# START LEAD — inline button
+# =========================
+@router.callback_query(F.data.startswith("lead:"))
+async def lead_start_inline(callback: types.CallbackQuery, state: FSMContext) -> None:
+    # обязательно, иначе Telegram будет показывать "loading"
+    await callback.answer()
+
+    await state.clear()
+    await state.set_state(LeadForm.contact_text)
+
+    # сохраняем источник (например lead:service:support_complex)
+    await state.update_data(lead_source=callback.data)
+
+    await callback.message.answer(CONTACT_PROMPT, reply_markup=get_lead_contact_kb())
+
+
+# =========================
+# COLLECT CONTACT
+# =========================
 @router.message(LeadForm.contact_text)
 async def lead_get_contact_text(message: types.Message, state: FSMContext, settings: Settings) -> None:
     text = (message.text or "").strip()
@@ -70,6 +94,9 @@ async def lead_get_contact_text(message: types.Message, state: FSMContext, setti
         await message.answer("Главное меню", reply_markup=get_main_menu())
         return
 
+    data = await state.get_data()
+    source = data.get("lead_source")
+
     user = message.from_user
 
     _append_lead({
@@ -78,9 +105,10 @@ async def lead_get_contact_text(message: types.Message, state: FSMContext, setti
         "username": user.username,
         "name": f"{user.first_name or ''} {user.last_name or ''}".strip(),
         "contact_text": text,
+        "source": source,
     })
 
-    # ✅ уведомление админу(ам) в личку
+    # уведомление админу(ам) в личку
     who = []
     name = f"{user.first_name or ''} {user.last_name or ''}".strip()
     if name:
@@ -92,7 +120,8 @@ async def lead_get_contact_text(message: types.Message, state: FSMContext, setti
     admin_text = (
         "<b>📩 Новая заявка</b>\n\n"
         f"<b>Кто:</b> {' | '.join(who)}\n"
-        f"<b>Контакт:</b> {text}"
+        f"<b>Контакт:</b> {text}\n"
+        f"<b>Источник:</b> {source}"
     )
 
     for admin_id in settings.admin_ids:
@@ -108,4 +137,3 @@ async def lead_get_contact_text(message: types.Message, state: FSMContext, setti
         "Специалист СПМО свяжется с вами в ближайшее время.",
         reply_markup=get_main_menu(),
     )
-
