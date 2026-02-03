@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import html
 from pathlib import Path
+
 from aiogram import Router, types, F
+from aiogram.exceptions import TelegramBadRequest
 
 from keyboards.main_menu import get_main_menu
 from keyboards.symptoms_menu import (
@@ -23,9 +26,7 @@ def _load_symptoms() -> dict[str, list[dict[str, str]]]:
 
 
 def _key_to_category(categories: list[str], key: str) -> str | None:
-    """
-    Находим реальную категорию по короткому ключу.
-    """
+    """Находим реальную категорию по короткому ключу."""
     for c in categories:
         if cat_key(c) == key:
             return c
@@ -33,13 +34,34 @@ def _key_to_category(categories: list[str], key: str) -> str | None:
 
 
 def _render_item(item: dict[str, str], *, index: int, total: int) -> str:
-    title = (item.get("title") or "").strip()
-    text = (item.get("text") or "").strip()
+    # ✅ Экранируем HTML, чтобы не ломались сущности вроде "<30"
+    title = html.escape((item.get("title") or "").strip())
+    text = html.escape((item.get("text") or "").strip())
+
     header = f"({index + 1}/{total})"
 
     if title:
         return f"<b>{title}</b> {header}\n\n{text}"
     return f"{header}\n\n{text}" if text else f"{header}\n\n—"
+
+
+async def _safe_edit_or_send(
+    callback: types.CallbackQuery,
+    text: str,
+    reply_markup: types.InlineKeyboardMarkup | None = None,
+) -> None:
+    """
+    Для навигации пытаемся редактировать сообщение.
+    Если Telegram ругается (например message is not modified / can't be edited) —
+    отправляем новое.
+    """
+    if not callback.message:
+        return
+
+    try:
+        await callback.message.edit_text(text, reply_markup=reply_markup)
+    except TelegramBadRequest:
+        await callback.message.answer(text, reply_markup=reply_markup)
 
 
 @router.message(F.text.contains("Симптомы") & F.text.contains("решения"))
@@ -68,36 +90,41 @@ async def on_symptoms_category(callback: types.CallbackQuery) -> None:
     payload = (callback.data or "").split("symcat:", 1)[-1]
 
     if payload == "__menu__":
-        await callback.message.answer("Главное меню 👇", reply_markup=get_main_menu())
         await callback.answer()
+        if callback.message:
+            await callback.message.answer("Главное меню 👇", reply_markup=get_main_menu())
         return
 
     if payload == "__back__":
-        await callback.message.answer(
+        await callback.answer()
+        await _safe_edit_or_send(
+            callback,
             "Выберите категорию:",
             reply_markup=build_symptoms_categories_kb(categories),
         )
-        await callback.answer()
         return
 
-    # payload теперь ключ (8 символов), а не текст категории
     category = _key_to_category(categories, payload)
-    await callback.answer()
-
     if not category:
-        await callback.message.answer("Категория не найдена. Откройте раздел заново.")
+        await callback.answer("Категория не найдена")
+        if callback.message:
+            await callback.message.answer("Категория не найдена. Откройте раздел заново.")
         return
 
     items = data.get(category, [])
-    if not items:
-        await callback.message.answer("В этой категории пока нет карточек.")
+    if not isinstance(items, list) or not items:
+        await callback.answer()
+        if callback.message:
+            await callback.message.answer("В этой категории пока нет карточек.")
         return
 
     idx = 0
     total = len(items)
     msg = _render_item(items[idx], index=idx, total=total)
 
-    await callback.message.answer(
+    await callback.answer()
+    await _safe_edit_or_send(
+        callback,
         msg,
         reply_markup=build_symptom_nav_kb(category, idx, total),
     )
@@ -123,8 +150,11 @@ async def on_symptom_item(callback: types.CallbackQuery) -> None:
         return
 
     items = data.get(category, [])
-    total = len(items)
+    if not isinstance(items, list):
+        await callback.answer("Ошибка данных категории")
+        return
 
+    total = len(items)
     if total == 0 or idx < 0 or idx >= total:
         await callback.answer("Карточка не найдена")
         return
@@ -132,7 +162,8 @@ async def on_symptom_item(callback: types.CallbackQuery) -> None:
     msg = _render_item(items[idx], index=idx, total=total)
 
     await callback.answer()
-    await callback.message.answer(
+    await _safe_edit_or_send(
+        callback,
         msg,
         reply_markup=build_symptom_nav_kb(category, idx, total),
     )
